@@ -1,0 +1,5 @@
+encryptionsalt: v1:FUZ/I6+O3MM=:v1:i7dy1kU5clD77znY:cAM+9d+0OyAEm8tthDmy15g02EFcZA==
+config:
+  aws:region: us-west-2
+  datavol:az: "0"
+  datavol:volume_size_gb: "40"

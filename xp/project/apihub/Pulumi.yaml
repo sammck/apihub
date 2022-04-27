@@ -1,0 +1,6 @@
+description: API hub server with traefik
+name: apihub
+runtime:
+  name: python
+  options:
+    virtualenv: ../../../.venv

@@ -1,0 +1,6 @@
+description: API hub EBS Data Volune
+name: ahdatavol
+runtime:
+  name: python
+  options:
+    virtualenv: ../../../.venv

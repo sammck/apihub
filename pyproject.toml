@@ -1,0 +1,84 @@
+[tool.poetry]
+name = "apihub"
+version = "0.1.0"
+description = "Traefik apihub project"
+authors = ["Sam McKelvie <dev@mckelvie.org>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+xpulumi = { path = "../xpulumi", develop = true }
+python-semantic-release = "^7.25.2"
+#project-init-tools = { git = "https://github.com/sammck/project-init-tools.git", branch = "main" }
+#project-init-tools = { file = "../project-init-tools/dist/project-init-tools-0.1.0.tar.gz" }
+#project-init-tools = { git = "https://github.com/sammck/project-init-tools.git", branch = "main" }
+#project-init-tools = { git = "https://github.com/sammck/project-init-tools.git", branch = "main" }
+
+[tool.poetry.dev-dependencies]
+pylint = "^2.13.4"
+autoflake = "^1.4"
+types-tabulate = "^0.8.7"
+types-pytz = "^2021.3.6"
+types-python-dateutil = "^2.8.12"
+types-requests = "^2.27.12"
+boto3-stubs = {extras = ["essential"], version = "^1.21.34"}
+boto3-type-annotations = "^0.3.1"
+types-PyYAML = "^6.0.5"
+mypy = "^0.931"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+
+[tool.semantic_release]
+version_variable = 'apihub/version.py:__version__'
+version_toml = 'pyproject.toml:tool.poetry.version'
+branch = 'main'
+upload_to_pypi = false
+upload_to_release = true
+build_command = "pip install poetry && poetry build"
+
+[tool.pylint.'MESSAGES CONTROL']
+disable=[
+    "wrong-import-order",
+    "duplicate-code",
+    "too-many-arguments",
+    "missing-function-docstring",
+    "import-outside-toplevel",
+    "too-few-public-methods",
+    "missing-class-docstring",
+    "unused-import",
+    "too-many-locals",
+    "unused-argument",
+    "invalid-name",
+    "no-self-use",
+    "global-statement",
+    "broad-except",
+    "too-many-branches",
+    "too-many-statements",
+    "exec-used",
+    "ungrouped-imports",
+    "subprocess-popen-preexec-fn",
+    "multiple-statements",
+    "too-many-public-methods",
+    "missing-module-docstring",
+    "too-many-instance-attributes",
+    "too-many-nested-blocks",
+    "unneeded-not",
+    "unnecessary-lambda",
+    "too-many-lines",
+    "too-many-boolean-expressions",
+  ]
+
+[tool.pylint.MASTER]
+ignore=[
+    ".venv",
+    "trash"
+  ]
+
+[tool.pylint.FORMAT]
+indent-after-paren=4
+indent-string='  '
+max-line-length=200

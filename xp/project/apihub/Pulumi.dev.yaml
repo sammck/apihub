@@ -1,0 +1,6 @@
+encryptionsalt: v1:8YyV3ROZu3A=:v1:EwXSAcAwnO7R5bN1:j5rVhez+6oHIvrNysBX2z9Q5HCcjAg==
+config:
+  apihub:ec2_user_password:
+    secure: v1:YnIK4AtNBTB+wkEJ:CGnzsWNdgMycOjS6tLP4nenTaJBOFNFXPlO3mX4=
+  aws:region: us-west-2
+
