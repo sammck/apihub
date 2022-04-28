@@ -556,11 +556,11 @@ cloud_config_obj: Input[JsonableDict] = dict(
     write_files = [
         dict(
             path= '/var/opt/cloudservice/docker-compose.yml',
-            permissions = 0o600,
-            owner = 'root',  # cloudserice not created at time of write_files
+            permissions = '600',
+            owner = 'root',  # cloudservice not created at time of write_files
             content = yamlify_promise(
                 dict(
-                    version=3,
+                    version="3",
                     services = dict(
                         traefik = dict(
                             image = 'traefik:v2.6',
@@ -584,7 +584,7 @@ cloud_config_obj: Input[JsonableDict] = dict(
           ),
         dict(
             path= '/etc/systemd/system/cloudservice.service',
-            permissions = 0o644,
+            permissions = '644',
             owner = 'root',
             content = dedent("""
                 [Unit]
@@ -593,23 +593,25 @@ cloud_config_obj: Input[JsonableDict] = dict(
                 After=cloud-final.service
 
                 [Install]
-                WantedBy=cloud-init.target
+                WantedBy=cloud-init.target multi-user.target
 
                 [Service]
-                User=cloudservice
-                Group=cloudservice
+                Type=oneshot
                 WorkingDirectory=/var/opt/cloudservice
-                Environment="HOME=/home/cloudservice"
-                ExecStart=/usr/local/bin/docker-compose up -d --remove-orphans
-                ExecStop=/usr/local/bin/docker-compose stop
-              """),
+                Environment=COMPOSE_HTTP_TIMEOUT=600
+                ExecStart=/usr/bin/env /usr/local/bin/docker-compose up -d --remove-orphans
+                ExecStop=/usr/bin/env /usr/local/bin/docker-compose stop
+                StandardOutput=syslog
+                RemainAfterExit=yes
+              """)
           ),
       ],
 
     # After all packages are installed, the following commands are run in order
     runcmd = [
         # start the cloudwatch agent if it could not start in the boot script,
-        [ "service", "amazon-cloudwatch-agent", "start" ],
+        [ "systemctl", "daemon-reload" ],
+        [ "systemctl", "start", "--no-block", "amazon-cloudwatch-agent" ],
 
         # install docker-compose
         [ 'bash', '-c',
@@ -623,6 +625,8 @@ cloud_config_obj: Input[JsonableDict] = dict(
         # remove existing keys, though, in case the user has added others.
         [ "bash", "-c",
             f"chown -R cloudservice.cloudservice /var/opt/cloudservice && "
+            f"systemctl enable cloudservice && "
+            f"systemctl start --no-block cloudservice && "
             f"( [ -e /home/cloudservice ] || mkhomedir_helper cloudservice ) && "
             f"( [ -e /home/{ec2_instance_username} ] || mkhomedir_helper {ec2_instance_username} ) && "
             f"mkdir -p -m 700 /home/{ec2_instance_username}/.ssh && "
