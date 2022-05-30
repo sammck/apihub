@@ -1,0 +1,4 @@
+boto3
+pulumi-crypto
+requests
+git+https://github.com/sammck/project-init-tools@stable

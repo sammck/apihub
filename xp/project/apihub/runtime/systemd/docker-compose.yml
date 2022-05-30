@@ -1,0 +1,248 @@
+version: '3.9'
+services:
+  traefik:
+    container_name: traefik
+    image: traefik:v2.6
+    ports:
+      - 80:80
+      - 443:443
+      - 8080:8080
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml
+      - /data/dsv/letsencrypt:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  postgres:
+    image: postgres:12-alpine
+    restart: unless-stopped
+    volumes:
+      - /data/dsv/keycloak-db:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: '${postgres_password}' # Note: password cannot contain single quote
+      POSTGRES_USER: keycloak
+      POSTGRES_DB: keycloak
+
+  keycloak:
+    depends_on:
+      - postgres
+      - traefik
+    container_name: keycloak
+    image: quay.io/keycloak/keycloak:18.0.0
+    restart: unless-stopped
+    command: start --hostname=sso.${dns_zone} --proxy edge
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: '${keycloak_admin_password}'  # NOTE: cannot contain single quote
+      PROXY_ADDRESS_FORWARDING: "true"
+      KEYCLOAK_FRONTEND_URL: https://sso.${dns_zone}
+      DB_VENDOR: postgres
+      DB_ADDR: postgres
+      DB_DATABASE: keycloak
+      DB_USER: keycloak
+      DB_PASSWORD: '${postgres_password}' # Note: password cannot contain single quote
+      #KEYCLOAK_LOGLEVEL: DEBUG
+      #ROOT_LOGLEVEL: DEBUG
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: curl --fail http://localhost:8080 || exit 1
+      interval: 6s
+      retries: 20
+      start_period: 5s
+      timeout: 10s
+    labels:
+      traefik.enable: "true"
+      #traefik.http.services.my-service.loadbalancer.server.port: "9000"
+      traefik.http.routers.keycloak.rule: Host(`sso.${dns_zone}`)
+      traefik.http.routers.keycloak.entrypoints: websecure
+      traefik.http.routers.keycloak.tls.certresolver: myresolver
+      #traefik.http.middlewares.keycloak-headers.headers.customresponseheaders.X-Frame-Options: ""
+      #traefik.http.routers.keycloak.middlewares: keycloak-headers@docker
+
+  keycloak-init:
+    build: ./keycloak-init
+    image: keycloak-init
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: '${keycloak_admin_password}'  # NOTE: cannot contain single quote
+      KEYCLOAK_FRONTEND_URL: https://sso.${dns_zone}
+      KEYCLOAK_BACKEND_URL: http://keycloak:8080
+      SHARED_AUTH_DOMAIN: ${dns_zone}
+      SMTP_ENVELOPE_FROM: '${smtp_reply_to}'
+      SMTP_FROM: '${smtp_username}'
+      SMTP_FROM_DISPLAY_NAME: '${admin_friendly_name}'
+      SMTP_HOST: '${smtp_host}'
+      SMTP_PASSWORD: '${smtp_password}'  # NOTE: cannot contain single quote
+      SMTP_PORT: "587"
+      SMTP_REPLY_TO: '${smtp_reply_to}'
+      SMTP_REPLY_TO_DISPLAY_NAME: '${admin_friendly_name}'
+      SMTP_SSL: ""
+      SMTP_STARTTLS: "true"
+      SMTP_USER: '${smtp_username}'
+      BASE_URL: https://${dns_zone}
+      REDIRECT_URIS: "https://auth.${dns_zone}/_auth*,https://demo.${dns_zone}/*"
+      SSO_CLIENT_SECRET: '${sso_client_secret}'
+      SSO_ADMIN_USERNAME: '${admin_email}'  # must be email
+      SSO_ADMIN_PASSWORD: '${sso_admin_password}'   # NOTE: cannot contain single quote
+      SSO_ADMIN_FRIENDLY_NAME: '${admin_friendly_name}'
+
+  keycloak-ready:
+    depends_on:
+      keycloak-init:
+        condition: service_completed_successfully      
+    image: alpine
+    command: echo "Keycloak successfully initialized!"
+
+  web-forwardauth:
+    depends_on:
+      - keycloak-ready
+    #profiles:
+    #  - donotstart
+    image: mesosphere/traefik-forward-auth:3.1.0
+    environment:
+      PROVIDER_URI: https://sso.${dns_zone}/realms/sso
+      CLIENT_ID: "sso-client"
+      CLIENT_SECRET: '${sso_client_secret}'
+      FORWARD_TOKEN_HEADER_NAME: "X-Forwarded-JWT"
+      SECRET: "${traefik_forward_auth_secret}"  #
+      ENCRYPTION_KEY: "${traefik_forward_auth_encryption_key}" # must be 32 bytes
+      COOKIE_DOMAIN: ${dns_zone}
+      AUTH_HOST: auth.${dns_zone}
+      SCOPE: "openid email profile roles"
+      LOG_LEVEL: debug
+    ports:
+      - "4181:4181"
+    labels:
+      traefik.enable: "true"
+      #traefik.docker.network: cloud-net
+
+      #traefik.http.routers.web-forwardauth.rule: Host(`tfa.${dns_zone}`)
+      traefik.http.routers.web-forwardauth.tls.certresolver: myresolver
+      traefik.http.routers.web-forwardauth.entrypoints: websecure
+      traefik.http.routers.web-forwardauth.rule: Host(`auth.${dns_zone}`)
+      #traefik.http.routers.web-forwardauth.rule: "Path(`/_oauth`)"
+      traefik.http.routers.web-forwardauth.middlewares: web-forwardauth
+      traefik.http.services.web-forwardauth.loadbalancer.server.port: "4181"
+      traefik.http.middlewares.web-forwardauth.forwardauth.address: http://web-forwardauth:4181
+      traefik.http.middlewares.web-forwardauth.forwardauth.authResponseHeaders: X-Forwarded-User, X-Forwarded-JWT
+      traefik.http.middlewares.web-forwardauth.forwardauth.trustForwardHeader: "true"
+    # restart: unless-stopped
+
+  traefik-dashboard:
+    depends_on:
+      - web-forwardauth
+    image: nginx
+    #ports:
+    #  - "8085:80"
+    volumes:
+      - ./traefik-dashboard/nginx.conf:/etc/nginx/nginx.conf
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.traefik-dashboard.entrypoints: websecure
+      traefik.http.routers.traefik-dashboard.tls.certresolver: myresolver
+      traefik.http.routers.traefik-dashboard.rule: Host(`traefik.${dns_zone}`)
+      traefik.http.routers.traefik-dashboard.middlewares: web-forwardauth
+
+  # oauth2-proxy:
+  #   depends_on:
+  #     - keycloak-ready
+  #   image: bitnami/oauth2-proxy:7.2.1
+  #   container_name: oauth2-proxy
+  #   # command: ''
+  #   hostname: oauth2-proxy
+  #   environment:
+  #     OAUTH2_PROXY_PROVIDER: keycloak-oidc
+  #     #OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: "${dns_zone} direct OIDC"
+  #     OAUTH2_PROXY_OIDC_ISSUER_URL: https://sso.${dns_zone}/realms/sso
+  #     OAUTH2_PROXY_CLIENT_ID: sso-client
+  #     OAUTH2_PROXY_CLIENT_SECRET: '${sso_client_secret}'
+  #     OAUTH2_PROXY_REDIRECT_URL: https://auth.${dns_zone}/oauth2/callback
+  #     OAUTH2_PROXY_COOKIE_SECRET: '${oauth2_proxy_cookie_secret}'
+  #     OAUTH2_PROXY_COOKIE_DOMAIN: ${dns_zone}
+  #     OAUTH2_PROXY_COOKIE_SAMESITE: lax
+  #     OAUTH2_PROXY_ALLOWED_ROLE: user
+  #     OAUTH2_PROXY_EMAIL_DOMAINS: '*'
+  #     OAUTH2_PROXY_UPSTREAMS: http://whoami
+  #   #volumes:
+  #   #  - "./oauth2-proxy.cfg:/oauth2-proxy.cfg"
+  #   restart: unless-stopped
+  #   ports:
+  #     - 4180:4180/tcp
+  #   labels:
+  #     traefik.enable: true
+  #     traefik.http.routers.oidc-test.entrypoints: websecure
+  #     traefik.http.routers.oidc-test.tls.certresolver: myresolver
+  #     traefik.http.routers.oidc-test.rule: Host(`auth.${dns_zone}`)
+
+  portainer:
+    depends_on:
+      - web-forwardauth
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    #security_opt:
+    #  - no-new-privileges:true
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /data/dsv/portainer-data:/data
+    ports:
+      - 9000:9000
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.portainer.entrypoints: websecure
+      traefik.http.routers.portainer.tls.certresolver: myresolver
+      traefik.http.routers.portainer.rule: Host(`portainer.${dns_zone}`)
+      traefik.http.routers.portainer.middlewares: web-forwardauth
+
+  demo:
+    #profiles:
+    #  - donotstart
+    depends_on:
+      - keycloak-ready
+      # - oauth2-proxy
+    build:
+      context: ./demo
+      args:
+        KEYCLOAK_URI: https://sso.${dns_zone}
+    image:  "keycloak-demo"
+    labels:
+      traefik.enable: true
+      traefik.http.routers.demo.entrypoints: websecure
+      traefik.http.routers.demo.tls.certresolver: myresolver
+      traefik.http.routers.demo.rule: Host(`demo.${dns_zone}`)
+      #traefik.http.routers.demo.middlewares: web-forwardauth
+    #restart: unless-stopped
+
+  whoami:
+    #profiles:
+    #  - donotstart
+    depends_on:
+      - web-forwardauth
+      # - oauth2-proxy
+    #build: ./domain-auth
+    image:  "traefik/whoami"
+    labels:
+      traefik.enable: true
+      traefik.http.middlewares.top-www-redirect.redirectregex.regex: '^https://www\.(.*)'
+      traefik.http.middlewares.top-www-redirect.redirectregex.replacement: 'https://$${1}'      
+      traefik.http.middlewares.top-www-redirect.redirectregex.permanent: True
+      traefik.http.routers.top-www.entrypoints: websecure
+      traefik.http.routers.top-www.tls.certresolver: myresolver
+      traefik.http.routers.top-www.rule: Host(`www.${dns_zone}`)
+      traefik.http.routers.top-www.middlewares: top-www-redirect
+      traefik.http.routers.top-site.entrypoints: websecure
+      traefik.http.routers.top-site.tls.certresolver: myresolver
+      traefik.http.routers.top-site.rule: Host(`${dns_zone}`)
+      traefik.http.routers.top-site.middlewares: web-forwardauth
+    #restart: unless-stopped
+
+#volumes: {}
+
+networks:
+  default:
+    name: cloud-net
+    driver: bridge

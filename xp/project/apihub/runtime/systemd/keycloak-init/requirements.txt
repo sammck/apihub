@@ -1,0 +1,11 @@
+certifi==2021.10.8
+charset-normalizer==2.0.12
+ecdsa==0.17.0
+idna==3.3
+pyasn1==0.4.8
+python-jose==3.3.0
+python-keycloak==0.27.0
+requests==2.27.1
+rsa==4.8
+six==1.16.0
+urllib3==1.26.9

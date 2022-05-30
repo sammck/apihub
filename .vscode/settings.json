@@ -5,6 +5,11 @@
         "editor.insertSpaces": true,
         "editor.tabSize": 2
     },
+    "[makefile]": {
+      "editor.insertSpaces": false,
+      "editor.tabSize": 8,
+      "editor.renderWhitespace": "all"
+    },
     "terminal.integrated.env.osx": {
       "PATH": "${workspaceFolder}/bin:${env:PATH}",
       "PYTHONPATH": "${workspaceFolder}/src/python:${env:PYTHONPATH}"

@@ -3,3 +3,92 @@ organization: g
 project_dependencies:
 - ahdatavol
 - awsenv
+stack_config_properties:
+  aws:region:
+    type_desc: Optional[str]
+  apihub:owner:
+    type_desc: Optional[str]
+  apihub:ec2_instance_username:
+    description: The username of a main user account to create. Default=local username
+    type_desc: Optional[str]
+  apihub:ec2_user_password:
+    description: An account password for the created user, to enable sudo
+    type_desc: str
+    is_secret: true
+  apihub:keycloak_admin_password:
+    description: The master realm admin user password for keycloak
+    type_desc: str
+    is_secret: true
+  apihub:smtp_password:
+    description: The SMTP account password keycloak uses to send notification email
+    type_desc: str
+    is_secret: true
+  apihub:sso_client_secret:
+    description: The oauth2 client secret for the keycloak sso realm client
+    type_desc: str
+    is_secret: true
+  apihub:sso_admin_password:
+    description: The oauth2 client secret for the keycloak sso realm client
+    type_desc: str
+    is_secret: true
+  apihub:traefik_forward_auth_secret:
+    description: The session secret for traefik-forward-auth
+    type_desc: str
+    is_secret: true
+  apihub:traefik_forward_auth_encryption_key:
+    description: The jwt encryption key used by traefik-forward-auth
+    type_desc: str
+    is_secret: true
+  apihub:postgres_password:
+    description: The password used to access the POSTGRES database
+    type_desc: str
+    is_secret: true
+  apihub:apihub_ec2_data_volume_sizes:
+    description: Data volume size in gigabytes, or 'none' to omit a data volume, default=40
+    type_desc: Optional[str]
+  apihub:apihub_ec2_ami_os_version:
+    description: The AMI OS version, default=20.04
+    type_desc: Optional[str]
+  apihub:apihub_ec2_use_elastic_ip:
+    description: True if an elastic IP addres should be created.  Default=true
+    type_desc: Optional[bool]
+  apihub:apihub_ec2_register_dns:
+    description: True if DNS subzones should be created. Default=True if subzones
+      are listed; false otherwise
+    type_desc: Optional[bool]
+  apihub:apihub_ec2_instance_name:
+    description: The name of the EC2 instance. Default=Derived from DNS names
+    type_desc: Optional[str]
+  apihub:apihub_ec2_user_data:
+    description: The cloud-init user-data document. Default=constructed at runtime
+    type_desc: Optional[str]
+  apihub:apihub_ssh_public_key:
+    description: An SSH public key, as found in id_rsa.pub or authorized_keys
+    type_desc: Optional[str]
+  apihub:apihub_ssh_public_key_file:
+    description: A file containing an SSH public key; e.g.. '/.ssh/id_rsa.pub'
+    type_desc: Optional[str]
+  apihub:apihub_ssh_keypair_id:
+    description: An EC2 keypair ID, to import an existing keypair rather than create
+      one. Default=create a new keypair
+    type_desc: Optional[str]
+  apihub:smtp_username:
+    description: The username keycloak uses to log into SMTP server to send mail
+    type_desc: str
+  apihub:smtp_reply_to:
+    type_desc: Optional[str]
+  apihub:admin_friendly_name:
+    description: The administrator's friendly name
+    type_desc: Optional[str]
+  apihub:admin_email:
+    description: The administrator's email address/username
+    type_desc: Optional[str]
+  apihub:ssl_email:
+    description: The owner's email address for SSL certificates
+    type_desc: Optional[str]
+  apihub:smtp_port:
+    description: The port keycloak will use to connect to SMTP
+    type_desc: Optional[int]
+  apihub:smtp_host:
+    description: The SMTP host keycloak will connect to to send email
+    type_desc: Optional[str]

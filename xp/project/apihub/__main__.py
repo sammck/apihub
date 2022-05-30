@@ -3,14 +3,23 @@
 # See LICENSE file accompanying this package.
 #
 
-from typing import cast
+from base64 import b64decode
+from typing import cast, Optional, Union, Tuple, List
 
 import json
 import shlex
 import os
-import pulumi
-from pulumi import Output, Input
+import hashlib
+import subprocess
+from itsdangerous import base64_encode
+from project_init_tools import get_git_user_email, get_git_user_friendly_name
 
+from pulumi_crypto import encrypt_string
+
+import pulumi
+from pulumi_random.random_id import RandomId
+from pulumi import Output, Input, Archive, FileArchive, ResourceOptions, StringAsset, Asset, FileAsset, RemoteAsset
+from pulumi_aws import iam, ssm, s3
 
 from xpulumi.exceptions import XPulumiError
 from xpulumi.internal_types import Jsonable, JsonableDict
@@ -33,8 +42,13 @@ from xpulumi.runtime import (
     concat_and_dedent,
     SyncStackOutputs,
     yamlify_promise,
+    sync_get_processor_arches_from_instance_type
+  )
+from xpulumi.util import (
+    split_s3_uri,
   )
 from xpulumi.runtime.common import (
+    get_current_xpulumi_project,
     get_aws_account_id,
     pulumi_project_name,
     stack_name,
@@ -42,7 +56,13 @@ from xpulumi.runtime.common import (
     config_property_info,
     long_stack,
     long_xstack,
+    get_aws_resource_options,
+    cloud_subaccount_prefix,
+    default_tags
   )
+from xpulumi.runtime_support.encrypted_string_provider import EncryptedString
+
+VERBOSE_PULUMI_LOGS = os.environ.get('VERBOSE_PULUMI_LOGS', '') != ''
 
 resource_prefix: str = ''
 cfg_prefix: str = ''
@@ -52,6 +72,11 @@ aws_env_import_prefix: str = ''
 data_vol_project_name: str = 'ahdatavol'
 data_vol_import_prefix: str = ''
 subzone_name = 'apihub'
+
+xpulumi_project = get_current_xpulumi_project()
+project_dir = xpulumi_project.project_dir
+intermediate_file_dir = os.path.join(project_dir, '.deploy', stack_name)
+os.makedirs(intermediate_file_dir, mode=0o700, exist_ok=True)
 
 # The xpulumi project name and stack name from which we will
 # import our AWS VPC network, subnets, availability zones, cloudwatch group,
@@ -71,21 +96,52 @@ ec2_instance_username: str = cast(str, default_val(pconfig.get(
   ), os.getlogin()))
 pulumi.export(f"{export_prefix}ec2_username", ec2_instance_username)
 
+# Get the list of DNS subnames to add. We have to preserve order, so that
+# unnecessary stack updates don't happen
+dns_subnames_str = pconfig.require(
+    'dns_subnames',
+    config_property_info(
+        description="Comma-delimited list of DNS subnames to route to the API hub. '.' will map to the bare DNS name."
+      )
+  )
+dns_raw_subnames_list = [ x.strip() for x in dns_subnames_str.split(',') ]
+dns_subnames: List[str] = []
+dns_subnames_set = set()
+for dns_subname in dns_raw_subnames_list:
+  if dns_subname == '':
+    raise ValueError(f'Empty DNS subname not allowed in config property dns_subnames: "{dns_subnames_str}"')
+  # Interpret '.' as the bare root domain. Replace with empty string.
+  if dns_subname == '.':
+    dns_subname = ''
+  # filter out duplicates
+  if not dns_subname in dns_subnames_set:
+    dns_subnames_set.add(dns_subname)
+    dns_subnames.append(dns_subname)
+
+assert len(dns_subnames) > 0
+
+def require_secret(name: str, description: str) -> Output[str]:
+  try:
+    result: Output[str] = pconfig.require_secret(
+        name,
+        config_property_info(description=description),
+      )
+  except Exception as e:
+    raise XPulumiError(
+        f"You must set [{description}] with \"pulumi -s {stack_name} config set --secret {name} '<value>'\""
+      ) from e
+  return result
+
 # The sudo password for our EC2 user. This must be set as a secret config value on this stack with
 #       pulumi -s dev config set --secret ec2_user_password <password>
 # NOTE: A strong password should be used because the /etc/shadow SHA512 hash of the password
 #       will appear in the EC2 instance's UserData, which is readable by anyone with EC2
 #       metadata query privileges on this AWS account, and IF leaked could be used in a
 #       dictionary attack.
-try:
-  ec2_user_password: Output[str] = pconfig.require_secret(
-      f'{cfg_prefix}ec2_user_password',
-      config_property_info(description="An account password for the created user, to enable sudo"),
-    )
-except Exception as e:
-  raise XPulumiError(
-      f"You must set an EC2 User sudo password with \"pulumi -s {stack_name} config set --secret {cfg_prefix}ec2_user_password <password>\""
-    ) from e
+ec2_user_password = require_secret(
+    f'{cfg_prefix}ec2_user_password',
+    "An account password for the created user, to enable sudo",
+  )
 
 # HashedPassword is a dynamic pulumi provider that computes an SHA512 hash
 # of the EC2 user password as it will appear in the instances /etc/shadow file.
@@ -129,8 +185,11 @@ assert isinstance(shared_s3_uri, str)
 stack_s3_uri = shared_s3_uri + f"/g/{pulumi_project_name}/{stack_name}"
 pulumi.export(f"{export_prefix}stack_s3_uri", stack_s3_uri)
 
+stack_s3_bucket, stack_s3_path = split_s3_uri(stack_s3_uri)
+
 # The ARN for an s3 resource has the "s3://" prefix stripped
 stack_s3_arn = Output.all(stack_s3_uri).apply(lambda args: f"arn:aws:s3:::{args[0][5:]}")
+
 
 # Import our root DNS zone from the shared stack. This may be a
 # Route53 subzone created by the shared stack, or a top-level
@@ -142,15 +201,60 @@ assert isinstance(main_dns_zone_id, str)
 main_dns_zone = DnsZone(resource_prefix=f'{resource_prefix}main-', zone_id=main_dns_zone_id)
 main_dns_zone.stack_export(export_prefix=f'{export_prefix}main_')
 
-# Create a subzone for our API hub:
-dns_zone = DnsZone(resource_prefix=f'{resource_prefix}apihub-', subzone_name=subzone_name, parent_zone=main_dns_zone, create_region=aws_region)
+use_main_dns_zone = True
+if use_main_dns_zone:
+  dns_zone = main_dns_zone
+else:
+  # Create a subzone for our API hub:
+  dns_zone = DnsZone(resource_prefix=f'{resource_prefix}apihub-', subzone_name=subzone_name, parent_zone=main_dns_zone, create_region=aws_region)
+
 dns_zone.stack_export(export_prefix=f'{export_prefix}apihub_')
 
+ssm_param_prefix = f'/{cloud_subaccount_prefix}{long_stack}/apihub/'
 
-# Define asecurity policy for our EC2 instance's IAM role.
+# gzip the runtime directory. We have to use gzip to preserve file permissions.
+# We cannot use pulumi folder Archive because it always produces a zipfile.
+# To make the result repeatable/deterministic (necessary so that Pulumi
+# doesn't unnecessarily replace the S3 BucketObject and all its dependencies),
+# we have to remove timestamps and owner/group info, and do tar and gzip
+# separately (the -n option on gzip suppresses addition of timestamp to the gzip file).
+# When we later untar the file, we will use --touch to set the modification timestamps
+# to the current time.
+runtime_dir = os.path.join(project_dir, 'runtime')
+runtime_tar_gz_filename = os.path.join(intermediate_file_dir, 'runtime.tar.gz')
+if os.path.exists(runtime_tar_gz_filename):
+  os.remove(runtime_tar_gz_filename)
+tar_cmd = [
+    'tar', '-cf', '-', '--sort=name', '-C', runtime_dir,
+      '--owner=root:0', '--group=root:0', '--mtime=UTC 2001-01-01', '.'
+  ]
+with open(runtime_tar_gz_filename, 'wb') as gzf:
+  with subprocess.Popen(
+        tar_cmd,
+        stdout=subprocess.PIPE
+      ) as tar_proc:
+    subprocess.check_call([ 'gzip', '-n' ], stdin=tar_proc.stdout, stdout=gzf)
+    exit_code = tar_proc.wait()
+    if exit_code != 0:
+      raise subprocess.CalledProcessError(exit_code, tar_cmd)
+
+runtime_s3_obj_uri = stack_s3_uri + '/apihub-runtime-archive.tar.gz'
+runtime_s3_obj_bucket, runtime_s3_obj_path = split_s3_uri(runtime_s3_obj_uri)
+
+runtime_s3_obj = s3.BucketObject(
+    f'{resource_prefix}apihub-runtime-archive',
+    bucket = runtime_s3_obj_bucket,
+    key = runtime_s3_obj_path,
+    source = FileAsset(runtime_tar_gz_filename),
+    content_type = "application/x-tar-gz",
+    tags = default_tags,
+    opts = get_aws_resource_options(aws_region),
+  )
+
+# Define a security policy for our EC2 instance's IAM role.
 # We will let it read and write to our stack's dedicated subkey
 # of the shared S3 bucket
-role_policy: JsonableDict = {
+role_policy_obj: JsonableDict = {
   "Version": "2012-10-17",
   "Statement": [
     # Nondestructive EC2 queries
@@ -158,6 +262,23 @@ role_policy: JsonableDict = {
       "Action": ["ec2:Describe*"],
       "Effect": "Allow",
       "Resource": "*",
+    },
+    {
+        "Effect": "Allow",
+        "Action": [
+            "ssm:DescribeParameters"
+        ],
+        "Resource": "*"
+    },
+    {
+        "Effect": "Allow",
+        "Action": [
+            "ssm:GetParameterHistory",
+            "ssm:GetParameter",
+            "ssm:GetParameters",
+            "ssm:GetParametersByPath",
+        ],
+        "Resource": f"arn:aws:ssm:{aws_region}:{get_aws_account_id()}:parameter{ssm_param_prefix}*"
     },
     # Read-only access to ECR, to fetch docker images
     {
@@ -204,6 +325,150 @@ role_policy: JsonableDict = {
   ],
 }
 
+# Build a JSON document with all secrets to pass to the EC2 instance
+class SecretsDoc:
+  name: str
+  data: Input[JsonableDict]
+  _opts: Optional[ResourceOptions] = None
+  _encrypted: Optional[EncryptedString] = None
+  _input_key: Input[Optional[bytes]] = None
+  _key_revision: Optional[int] = None
+
+  def __init__(
+        self,
+        name: str,
+        key: Input[Optional[bytes]]=None,
+        opts: Optional[ResourceOptions]=None,
+        key_revision: Optional[int]=None):
+    self.name = name
+    self.data = {}
+    self._input_key = key
+    self._key_revision = key_revision
+    self._opts = opts
+
+  def add_secret(self, name: str, value: Input[Jsonable]) -> None:
+    assert self._encrypted is None
+    self.data[name] = value
+
+  def add_cfg_secret(self, cfg_name: str, description: str, name: Optional[str]= None) -> None:
+    assert self._encrypted is None
+    if name is None:
+      name = cfg_name
+    value = require_secret(
+        f'{cfg_prefix}{cfg_name}',
+        description,
+      )
+    self.add_secret(name, value)
+
+  def render_json(
+        self,
+        indent: Input[Optional[Union[int, str]]]=None,
+        separators: Input[Optional[Tuple[str, str]]]=None,
+      ) -> Output[str]:
+    return jsonify_promise(self.data, indent=indent, separators=separators)
+
+  def render_compressed_json(self) -> Output[str]:
+    return self.render_json(separators=(',', ':'))
+
+  def content_hash(self) -> Output[str]:
+    result = self.render_compressed_json().apply(lambda x: hashlib.sha256(x.encode('utf-8')).hexdigest())
+    return result
+
+  def render_encrypted(self) -> EncryptedString:
+    if self._encrypted is None:
+      self._encrypted = EncryptedString(
+          self.name,
+          self.render_compressed_json(),
+          key=self._input_key,
+          opts=self._opts,
+          key_revision=self._key_revision,
+        )
+    return self._encrypted
+
+
+secrets = SecretsDoc(f"{resource_prefix}apihub-secrets", key_revision=2)
+
+# a dummy secret just to force replacement
+secrets.add_secret(
+    'apihub_secrets_revision',
+    "1",
+  )
+secrets.add_cfg_secret(
+    'keycloak_admin_password',
+    "The master realm admin user password for keycloak",
+  )
+secrets.add_cfg_secret(
+    'smtp_password',
+    "The SMTP account password keycloak uses to send notification email",
+  )
+secrets.add_cfg_secret(
+    'sso_client_secret',
+    "The oauth2 client secret for the keycloak sso realm client",
+  )
+secrets.add_cfg_secret(
+    'sso_admin_password',
+    "The oauth2 client secret for the keycloak sso realm client",
+  )
+secrets.add_cfg_secret(
+    'traefik_forward_auth_secret',
+    "The session secret for traefik-forward-auth",
+  )
+secrets.add_cfg_secret(
+    'traefik_forward_auth_encryption_key',
+    "The jwt encryption key used by traefik-forward-auth",
+  )
+secrets.add_cfg_secret(
+    'postgres_password',
+    "The password used to access the POSTGRES database",
+  )
+secrets.add_cfg_secret(
+    'traefik_forward_auth_secret',
+    "Secret used by traefik-forward-auth to validate JWT",
+  )
+secrets.add_cfg_secret(
+    'traefik_forward_auth_encryption_key',
+    "Secret used by traefik-forward-auth to encrypt JWT",
+  )
+secrets.add_cfg_secret(
+    'oauth2_proxy_cookie_secret',
+    "Secret used by oauth2-proxy to protect session cookie",
+  )
+secrets.add_cfg_secret(
+    'traefik_pilot_token',
+    "Token used by traefik to register with Traefik Pilot service",
+  )
+
+# Encrypt the secret json document
+encrypted_secrets_resource = secrets.render_encrypted()
+secrets_key_b64 = encrypted_secrets_resource.key_b64
+encrypted_secrets = encrypted_secrets_resource.ciphertext
+
+# Save the secrets AES key in AWS Systems Manager Parameter Store as a base64 SecureString
+# Our EC2 instance will be able to read this parameter
+ssm_param_secret_key = ssm.Parameter(
+    f"{resource_prefix}ssm_param_secret_key_b64",
+    name=f"{ssm_param_prefix}ssm_param_secret_key_b64",
+    type="SecureString",
+    value=secrets_key_b64,
+    tags=default_tags,
+    opts=get_aws_resource_options(aws_region),
+  )
+
+
+# Put the encrypted secrets in S3
+secrets_s3_obj_uri = stack_s3_uri + '/apihub-secrets.txt'
+secrets_s3_obj_bucket, secrets_s3_obj_path = split_s3_uri(secrets_s3_obj_uri)
+
+secrets_s3_obj = s3.BucketObject(
+    f'{resource_prefix}apihub-secrets-s3-obj',
+    bucket = secrets_s3_obj_bucket,
+    key = secrets_s3_obj_path,
+    content = encrypted_secrets,
+    content_type = "text/plain",
+    tags = default_tags,
+    opts = get_aws_resource_options(aws_region),
+  )
+
 # Begin configuring an EC2 instance along with all of its associated
 # resources (security group, role, role policy, attached volumes, elastic IP,
 # DNS records, etc.). Because commit==False, this object won't actually create any resources until
@@ -223,7 +488,7 @@ ec2_instance = Ec2Instance(
     # EC2 instance. An elastic IP is required. An empty string ('') causes
     # the bare parent domain to route to our EC2 instance--obviously on
     # one project can do this for a given zone.
-    dns_subnames=[ '', 'www', 'api' ],
+    dns_subnames=dns_subnames,
 
     # The TCP port numbers that should be open to the internet
     open_ports=[ 22, 80, 443 ],
@@ -239,7 +504,7 @@ ec2_instance = Ec2Instance(
     instance_type="t3.medium",
 
     # Security policy to grant to this instance's IAM role
-    role_policy_obj=role_policy,
+    role_policy_obj=role_policy_obj,
 
     # Number of gigabytes to allot for the system boot volume. Note that
     # we will be mounting a separate volume for home directories and to
@@ -250,9 +515,14 @@ ec2_instance = Ec2Instance(
     # Afer constructing the Ec2Instance object, wait for an explicit
     # commit before asking Pulumi to create resources. That allows
     # further programmating configuration.
-    commit=False
+    commit=False,
+    debug_log=VERBOSE_PULUMI_LOGS,
   )
 
+#ecs_agent_attached_policy = ec2_instance.attach_role_policy(
+#    policy_arn="arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role",
+#    resource_name=f'{resource_prefix}ec2-attached-policy-ecs_agent',
+#  )
 
 # Add a separate data EBS volume to the instance. Unlike the built-in boot volume,
 # this volume is *NOT* destroyed when the EC2 instance is terminated/recreated due
@@ -356,6 +626,13 @@ cloud_init_watch_script=concat_and_dedent('''
       rfc=rfc2
   ''')
 
+ami_arch = ec2_instance.ami_arch
+pulumi.info(f"EC2 AMI architecture={ami_arch}")
+processor_arches = ec2_instance.processor_arches
+pulumi.info(f"EC2 Processor architectures={processor_arches}")
+processor_arch = 'aarch64' if 'aarch64' in ec2_instance.processor_arches else 'x86_64'
+pulumi.info(f"Selected Processor architecture={processor_arch}")
+
 # For bind mounts, the cloud-init "mounts" module requires that mountpoints pre-exist
 # before mounting. So we create the docker volumes mountpoint in a boothook, long
 # before docker is installed. We also take this opportunity to:
@@ -381,7 +658,7 @@ ec2_instance.add_user_data(Output.concat(concat_and_dedent('''
     which aws || true
     apt-get update
     apt-get install -y unzip || true
-    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-''', processor_arch, '''.zip" -o "awscliv2.zip"
     unzip awscliv2.zip
     ./aws/install
 
@@ -413,15 +690,15 @@ ec2_instance.add_user_data(Output.concat(concat_and_dedent('''
 # region, and for each AWS account. Also, there is a customized authentication
 # plugin for docker that allows you to access the repository using your AWS
 # credentials.
-ecr_domain: str = f"{get_aws_account_id(aws_region)}.dkr.ecr.{aws_region}.amazonaws.com"
-
-docker_config_obj = {
-    "credHelpers": {
-        "public.ecr.aws": "ecr-login",
-        ecr_domain: "ecr-login"
-      }
-  }
-docker_config = json.dumps(docker_config_obj, separators=(',', ':'), sort_keys=True)
+#ecr_domain: str = f"{get_aws_account_id(aws_region)}.dkr.ecr.{aws_region}.amazonaws.com"
+#
+#docker_config_obj = {
+#    "credHelpers": {
+#        "public.ecr.aws": "ecr-login",
+#        ecr_domain: "ecr-login"
+#      }
+#  }
+#docker_config = json.dumps(docker_config_obj, separators=(',', ':'), sort_keys=True)
 
 # Commit the keypair now. This ensures that ec2_instance.keypair.public_key has a value derived
 # from configuration (we pass the value to cloud-config as well)
@@ -430,6 +707,48 @@ pubkey = ec2_instance.keypair.public_key
 assert not pubkey is None
 
 main_systemd_service = "cloudservice"
+
+# Create a nonsecret cloudservice config document
+cloudservice_config_s3_obj_uri = stack_s3_uri + '/cloudservice-config.json'
+cloudservice_config_s3_obj_bucket, cloudservice_config_s3_obj_path = split_s3_uri(
+    cloudservice_config_s3_obj_uri
+  )
+
+smtp_username = pconfig.require('smtp_username', config_property_info(description="The username keycloak uses to log into SMTP server to send mail"))
+smtp_reply_to: str = default_val(pconfig.get('smtp_reply_to'), config_property_info(description="The email address that recipients will reply to for mail from keycloak"))
+admin_friendly_name = pconfig.get('admin_friendly_name', config_property_info(description="The administrator's friendly name"))
+if admin_friendly_name is None:
+  admin_friendly_name = get_git_user_friendly_name()
+admin_email = pconfig.get('admin_email', config_property_info(description="The administrator's email address/username"))
+if admin_email is None:
+  admin_email = get_git_user_email()
+ssl_email = default_val(pconfig.get('ssl_email', config_property_info(description="The owner's email address for SSL certificates")), admin_email)
+
+cloudservice_config_obj: Input[JsonableDict] = dict(
+    stack_s3_uri = stack_s3_uri,
+    secrets_s3_obj_uri = secrets_s3_obj_uri,
+    ssm_param_secret_key = ssm_param_secret_key.name,
+    primary_username = ec2_instance_username,
+    primary_user_ssh_public_key = pubkey,
+    ssl_email = ssl_email,
+    dns_zone = dns_zone.zone_name,
+    smtp_username = smtp_username,
+    smtp_reply_to = smtp_reply_to,
+    admin_friendly_name = admin_friendly_name,
+    admin_email = admin_email,
+    smtp_port = default_val(pconfig.get_int('smtp_port', config_property_info(description="The port keycloak will use to connect to SMTP")), 587),
+    smtp_host = default_val(pconfig.get('smtp_host', config_property_info(description="The SMTP host keycloak will connect to to send email")), 'smtp.gmail.com')
+  )
+
+cloudservice_config_s3_obj = s3.BucketObject(
+    f'{resource_prefix}apihub-cloudservice-config-s3-obj',
+    bucket = cloudservice_config_s3_obj_bucket,
+    key = cloudservice_config_s3_obj_path,
+    content = jsonify_promise(cloudservice_config_obj),
+    content_type = "application/json",
+    tags = default_tags,
+    opts = get_aws_resource_options(aws_region),
+  )
 
 # create the main cloud-init document as structured, JSON-able data. xpulumi
 # will automatically render this as YAML and properly embed it in the user-data
@@ -532,7 +851,7 @@ cloud_config_obj: Input[JsonableDict] = dict(
         sources = {
           # Add docker's dpkg repository to apt-get search list, so we can install latest stable docker
           "docker.list": dict(
-              source = "deb [arch=amd64] https://download.docker.com/linux/ubuntu $RELEASE stable",
+              source = f"deb [arch={ami_arch}] https://download.docker.com/linux/ubuntu $RELEASE stable",
               keyid = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
             ),
           },
@@ -550,60 +869,31 @@ cloud_config_obj: Input[JsonableDict] = dict(
         "docker-ce-cli",
         "amazon-ecr-credential-helper",
         "python3-pip",
+        "python3-virtualenv",
       ],
 
     # create a systemd service that starts our custom service stack with docker-compose:
     write_files = [
         dict(
-            path= '/var/opt/cloudservice/docker-compose.yml',
-            permissions = '600',
-            owner = 'root',  # cloudservice not created at time of write_files
-            content = yamlify_promise(
-                dict(
-                    version="3",
-                    services = dict(
-                        traefik = dict(
-                            image = 'traefik:v2.6',
-                            # Enables the web UI and tells Traefik to listen to docker
-                            command = '--api.insecure=true --providers.docker',
-                            ports = [
-                                # The HTTP port that exposes all proxied services
-                                "80:80",
-                                # THe Traefik dashboard UI. Not secure! Do not expose to internet.
-                                "8080:8080",
-                              ],
-                            volumes = [
-                                # Allow traefik to monitor Docker to dynamically configure the proxy
-                                '/var/run/docker.sock:/var/run/docker.sock'
-                              ],
-                          ),
-                      ),
-                  ),
-                width=10000,
-              ),
-          ),
-        dict(
-            path= '/etc/systemd/system/cloudservice.service',
-            permissions = '644',
+            path= '/var/opt/cloudservice/one-time-init.sh',
+            permissions = '700',
             owner = 'root',
-            content = dedent("""
-                [Unit]
-                Description=Custom post cloud-init service
-                Requires=docker.service
-                After=cloud-final.service
-
-                [Install]
-                WantedBy=cloud-init.target multi-user.target
-
-                [Service]
-                Type=oneshot
-                WorkingDirectory=/var/opt/cloudservice
-                Environment=COMPOSE_HTTP_TIMEOUT=600
-                ExecStart=/usr/bin/env /usr/local/bin/docker-compose up -d --remove-orphans
-                ExecStop=/usr/bin/env /usr/local/bin/docker-compose stop
-                StandardOutput=syslog
-                RemainAfterExit=yes
-              """)
+            content = concat_and_dedent("""
+                #!/bin/bash
+                set -eo pipefail
+                cd /var/opt/cloudservice/
+                rm -fr oneshot
+                mkdir -p -m 700 oneshot/runtime
+                cd oneshot/runtime
+                aws s3 cp """, runtime_s3_obj_uri, """ ../runtime.tar.gz
+                tar -xf ../runtime.tar.gz --touch
+                rm ../runtime.tar.gz
+                cd one-time-init
+                virtualenv ./.venv
+                . ./.venv/bin/activate
+                pip3 install -r requirements.txt
+                python3 main.py '""", cloudservice_config_s3_obj_uri,"""' 2>&1 | tee /var/log/one-time-init.log
+              """),
           ),
       ],
 
@@ -613,21 +903,23 @@ cloud_config_obj: Input[JsonableDict] = dict(
         [ "systemctl", "daemon-reload" ],
         [ "systemctl", "start", "--no-block", "amazon-cloudwatch-agent" ],
 
-        # install docker-compose
-        [ 'bash', '-c',
-            '''curl -L "https://github.com/docker/compose/releases/download/1.25.4/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && '''
-            '''sudo chmod +x /usr/local/bin/docker-compose'''
-          ],
+        ## install docker-compose
+        #[ 'bash', '-c',
+        #    '''curl -L "https://github.com/docker/compose/releases/download/1.25.4/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && '''
+        #    '''sudo chmod +x /usr/local/bin/docker-compose'''
+        #  ],
+
+        # create the user's home directory now that we have mounted /home. Note: the directory
+        # will already exist if this is a reused data volume from a previous EC2 instance. We always
+        # make sure the SSH key is added to authorized_keys in case it has been changed. We do not
+        # remove existing keys, though, in case the user has added others.
+        [ "/var/opt/cloudservice/one-time-init.sh" ],
 
         # create the user's home directory now that we have mounted /home. Note: the directory
         # will already exist if this is a reused data volume from a previous EC2 instance. We always
         # make sure the SSH key is added to authorized_keys in case it has been changed. We do not
         # remove existing keys, though, in case the user has added others.
         [ "bash", "-c",
-            f"chown -R cloudservice.cloudservice /var/opt/cloudservice && "
-            f"systemctl enable cloudservice && "
-            f"systemctl start --no-block cloudservice && "
-            f"( [ -e /home/cloudservice ] || mkhomedir_helper cloudservice ) && "
             f"( [ -e /home/{ec2_instance_username} ] || mkhomedir_helper {ec2_instance_username} ) && "
             f"mkdir -p -m 700 /home/{ec2_instance_username}/.ssh && "
             f"chown {ec2_instance_username}.{ec2_instance_username} /home/{ec2_instance_username}/.ssh && "
@@ -648,7 +940,7 @@ cloud_config_obj: Input[JsonableDict] = dict(
         # This command sets up docker on the root user to authenticate against ECR using AWS
         # credentials inherited by this EC2 instance through its associated IAM Role (created for
         # us by EC2 instance above). A similar thing could be done for any user.
-        [ "bash", "-c", f"mkdir -p /root/.docker && chmod 700 /root/.docker && echo {shlex.quote(docker_config)} > /root/.docker/config.json && chmod 600 /root/.docker/config.json" ],
+        #[ "bash", "-c", f"mkdir -p /root/.docker && chmod 700 /root/.docker && echo {shlex.quote(docker_config)} > /root/.docker/config.json && chmod 600 /root/.docker/config.json" ],
 
         # This command adds an iptables rule that will block all docker containers (unless they are on the host network) from
         # accessing the EC2 instance's metadata service. This is an important secuurity precaution, since
@@ -656,11 +948,11 @@ cloud_config_obj: Input[JsonableDict] = dict(
         # read any secrets passed to the instance through UserData (e.g., the hashed sudo password).
         # If there are trusted containers, we can create special rules for them...
         # TODO: This must be done on every boot, not just the first boot # pylint: disable=fixme
-        [ "iptables", "--insert", "DOCKER-USER", "--destination", "169.254.169.254", "--jump", "REJECT" ],
+        #[ "iptables", "--insert", "DOCKER-USER", "--destination", "169.254.169.254", "--jump", "REJECT" ],
 
-        [ "find", "/home"],
-        [ "ls", "-l", f"/home/{ec2_instance_username}/.ssh/"],
-        [ "cat", f"/home/{ec2_instance_username}/.ssh/authorized_keys" ],
+        #[ "find", "/home"],
+        #[ "ls", "-l", f"/home/{ec2_instance_username}/.ssh/"],
+        #[ "cat", f"/home/{ec2_instance_username}/.ssh/authorized_keys" ],
 
         # All done
         [ "bash", "-c", 'echo "All Done!"' ],

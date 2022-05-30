@@ -1,6 +1,31 @@
 encryptionsalt: v1:8YyV3ROZu3A=:v1:EwXSAcAwnO7R5bN1:j5rVhez+6oHIvrNysBX2z9Q5HCcjAg==
 config:
+  apihub:admin_email: sammck@gmail.com
+  apihub:admin_friendly_name: Sam McKelvie
+  apihub:dns_subnames: .,www,api,sso,auth,demo,traefik,portainer
   apihub:ec2_user_password:
     secure: v1:YnIK4AtNBTB+wkEJ:CGnzsWNdgMycOjS6tLP4nenTaJBOFNFXPlO3mX4=
+  apihub:keycloak_admin_password:
+    secure: v1:hwKHktSyvmlIcM3r:wG0B8Fv+OkAX8go0QVSrYNcEboIxeFp0Dwzd1eo=
+  apihub:oauth2_proxy_cookie_secret:
+    secure: v1:E3ckX6qYSDOrOdva:VvTpawVm2OVt5AKxbgPB8m1XV/k1pq4FSDFUPvkY64ukNFyJTs/6tYkgpcmn8hCRxPYAtF2MlLPAppIj
+  apihub:postgres_password:
+    secure: v1:P/otFtSgRuABLHpX:eghGw3DKwA+ckgT6h8fS9t2Ye29h8qEs
+  apihub:smtp_host: smtp.gmail.com
+  apihub:smtp_password:
+    secure: v1:ii618IZ6WXGv/nbn:0+oYeFmQN8dapIOiwuAZV/mOwchbax8AYkILr5JO8QA=
+  apihub:smtp_port: "587"
+  apihub:smtp_reply_to: dev@mckelvie.org
+  apihub:smtp_username: sammck.sec@gmail.com
+  apihub:ssl_email: dev@mckelvie.org
+  apihub:sso_admin_password:
+    secure: v1:6Vl5P457CVCSWzWi:xEEu7wl/1OqAXHVTNIFhffjJW+aEdC5mUSxS0d0=
+  apihub:sso_client_secret:
+    secure: v1:Dc015xCLAiKiYKGY:O5nuJ7rEiNY96hOL4NrCjqpUv+1WdD1tLeauSdK4STViO6wWPDOBNnXQv1x9WW/M
+  apihub:traefik_forward_auth_encryption_key:
+    secure: v1:woSEAwvG4uwbqXNn:T8PYoy0ZfvgPwUM0RatbtpVvUOkc6GBSCUnSJMwSQLfa8n0pVHm89QoSAwVYHqbM
+  apihub:traefik_forward_auth_secret:
+    secure: v1:1dEWiOCs3+90w/KY:EjfecZVFGbTTh69r97/BT5Dx+nIaFmxCrmw3mPFUS4upW1vH2A1m6F2aSxz4y4tV
+  apihub:traefik_pilot_token:
+    secure: v1:OXSsRZOEo8mfHtpw:nh1ScB0R6yWk4HseErMXv4HoBwPMgKBTTb/nNX9DUzpJO6p6D+J91g4tNoxomt8rQnfcVg==
   aws:region: us-west-2
-

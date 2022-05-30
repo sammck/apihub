@@ -1,0 +1,16 @@
+[Unit]
+Description=Custom post cloud-init service
+Requires=docker.service
+After=cloud-final.service
+
+[Install]
+WantedBy=cloud-init.target multi-user.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/var/opt/cloudservice/active/runtime/systemd
+Environment=COMPOSE_HTTP_TIMEOUT=600
+ExecStart=/usr/bin/env bash /var/opt/cloudservice/active/runtime/systemd/up.sh
+ExecStop=/usr/bin/env bash /var/opt/cloudservice/active/runtime/systemd/stop.sh
+StandardOutput=syslog
+RemainAfterExit=yes

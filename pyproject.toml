@@ -13,6 +13,15 @@ python-semantic-release = "^7.25.2"
 #project-init-tools = { file = "../project-init-tools/dist/project-init-tools-0.1.0.tar.gz" }
 #project-init-tools = { git = "https://github.com/sammck/project-init-tools.git", branch = "main" }
 #project-init-tools = { git = "https://github.com/sammck/project-init-tools.git", branch = "main" }
+python-keycloak = "^0.27.0"
+jsondiff = "^2.0.0"
+fastapi = "^0.76.0"
+uvicorn = "^0.17.6"
+fastapi-resource-server = "^0.1.2"
+flask-oidc = "^1.4.0"
+python-dotenv = "^0.20.0"
+pulumi-crypto = "^1.1.0"
+file-collection-hash = "^1.0.0"
 
 [tool.poetry.dev-dependencies]
 pylint = "^2.13.4"
@@ -25,6 +34,7 @@ boto3-stubs = {extras = ["essential"], version = "^1.21.34"}
 boto3-type-annotations = "^0.3.1"
 types-PyYAML = "^6.0.5"
 mypy = "^0.931"
+boto3 = "^1.23.5"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
@@ -79,6 +89,7 @@ ignore=[
   ]
 
 [tool.pylint.FORMAT]
+indent=2
 indent-after-paren=4
 indent-string='  '
 max-line-length=200

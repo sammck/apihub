@@ -1,0 +1,5 @@
+{
+  "realm" : "sso",
+  "auth-server-url" : "https://sso.mckelvie.org",
+  "resource" : "demo-client"
+}
